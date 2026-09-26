@@ -1,0 +1,39 @@
+#!/usr/bin/python3
+"""Send text (stdin) to the Kokoro TTS server and write raw PCM to stdout.
+
+Used by Speech Dispatcher's sd_generic module:
+    printf %s "$DATA" | kokoro-say --voice af_heart --rate 0 | pw-play --raw ...
+"""
+import argparse
+import json
+import os
+import socket
+import sys
+
+SOCKET = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "kokoro-tts.sock")
+
+
+def rate_to_speed(rate: int) -> float:
+    """Map a Speech Dispatcher rate (-100 slowest .. 0 normal .. 100 fastest)
+    to a Kokoro speed multiplier (the server clamps it to 0.5 .. 2.0)."""
+    # Exponential: -100 -> 0.5x, 0 -> 1.0x, 100 -> 2.0x, with even steps across the range
+    return 2 ** (max(-100, min(rate, 100)) / 100)
+
+
+parser = argparse.ArgumentParser()
+parser.add_argument("--voice", default="af_heart")
+parser.add_argument("--rate", type=int, default=0)
+parser.add_argument("--speed", type=float, help="Kokoro speed; overrides --rate")
+args = parser.parse_args()
+
+text = sys.stdin.read()
+speed = args.speed if args.speed is not None else rate_to_speed(args.rate)
+request = json.dumps({"text": text, "voice": args.voice, "speed": speed}) + "\n"
+
+with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+    sock.connect(SOCKET)
+    sock.sendall(request.encode())
+    out = sys.stdout.buffer
+    while chunk := sock.recv(65536):
+        out.write(chunk)
+        out.flush()

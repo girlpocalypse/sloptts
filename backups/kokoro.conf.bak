@@ -1,0 +1,48 @@
+# Kokoro TTS via the kokoro-tts user service (~/kokoro/server.py in the "kokoro" distrobox).
+# kokoro-say streams raw 24 kHz mono float32 PCM, played directly with pw-play.
+Debug 0
+
+GenericExecuteSynth \
+"printf %s \'$DATA\' | /var/home/user/.local/bin/kokoro-say --voice \'$VOICE\' --rate $RATE | pw-play --raw --rate 24000 --channels 1 --format f32 -"
+
+GenericCmdDependency "pw-play"
+
+# Pass Speech Dispatcher's raw rate (-100..100) through; kokoro-say maps it to a speed
+GenericRateAdd 0
+GenericRateMultiply 100
+GenericRateForceInteger 1
+
+
+# Extra voices first: for a repeated language+type, sd_generic uses the last one listed.
+AddVoice "en" "FEMALE1" "af_bella"
+AddVoice "en" "FEMALE1" "af_nicole"
+AddVoice "en-GB" "FEMALE1" "bf_emma"
+AddVoice "en-GB" "FEMALE1" "bf_isabella"
+# Every voice type maps to af_heart so apps and Orca never switch voices;
+# other voices are still selectable by name (e.g. spd-say -y bf_emma).
+AddVoice "en" "MALE1" "af_heart"
+AddVoice "en" "MALE2" "af_heart"
+AddVoice "en" "MALE3" "af_heart"
+AddVoice "en" "FEMALE1" "af_heart"
+AddVoice "en" "FEMALE2" "af_heart"
+AddVoice "en" "FEMALE3" "af_heart"
+AddVoice "en" "CHILD_MALE" "af_heart"
+AddVoice "en" "CHILD_FEMALE" "af_heart"
+AddVoice "en-US" "MALE1" "af_heart"
+AddVoice "en-US" "MALE2" "af_heart"
+AddVoice "en-US" "MALE3" "af_heart"
+AddVoice "en-US" "FEMALE1" "af_heart"
+AddVoice "en-US" "FEMALE2" "af_heart"
+AddVoice "en-US" "FEMALE3" "af_heart"
+AddVoice "en-US" "CHILD_MALE" "af_heart"
+AddVoice "en-US" "CHILD_FEMALE" "af_heart"
+AddVoice "en-GB" "MALE1" "af_heart"
+AddVoice "en-GB" "MALE2" "af_heart"
+AddVoice "en-GB" "MALE3" "af_heart"
+AddVoice "en-GB" "FEMALE1" "af_heart"
+AddVoice "en-GB" "FEMALE2" "af_heart"
+AddVoice "en-GB" "FEMALE3" "af_heart"
+AddVoice "en-GB" "CHILD_MALE" "af_heart"
+AddVoice "en-GB" "CHILD_FEMALE" "af_heart"
+
+DefaultVoice "af_heart"

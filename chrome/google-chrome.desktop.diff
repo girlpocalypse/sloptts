@@ -1,0 +1,29 @@
+--- /var/home/user/kokoro/google-chrome.desktop.bak	2026-09-24 05:06:53.359237643 -0700
++++ /var/home/user/.local/share/applications/google-chrome.desktop	2026-09-24 05:06:58.836853116 -0700
+@@ -101,7 +101,7 @@
+ Comment[zh_CN]=访问互联网
+ Comment[zh_HK]=連線到網際網路
+ Comment[zh_TW]=連線到網際網路
+-Exec=/usr/bin/google-chrome-stable --ozone-platform-hint=auto --enable-blink-features=MiddleClickAutoscroll %U
++Exec=/usr/bin/google-chrome-stable --enable-speech-dispatcher --ozone-platform-hint=auto --enable-blink-features=MiddleClickAutoscroll %U
+ StartupNotify=true
+ StartupWMClass=google-chrome
+ Terminal=false
+@@ -172,7 +172,7 @@
+ Name[vi]=Cửa sổ Mới
+ Name[zh_CN]=新建窗口
+ Name[zh_TW]=開新視窗
+-Exec=/usr/bin/google-chrome-stable
++Exec=/usr/bin/google-chrome-stable --enable-speech-dispatcher
+ Name[en]=New Window
+ Name[en_US]=New Window
+ Name[en_US.UTF-8]=New Window
+@@ -227,7 +227,7 @@
+ Name[vi]=Cửa sổ ẩn danh mới
+ Name[zh_CN]=新建隐身窗口
+ Name[zh_TW]=新增無痕式視窗
+-Exec=/usr/bin/google-chrome-stable --incognito
++Exec=/usr/bin/google-chrome-stable --enable-speech-dispatcher --incognito
+ Name[en]=New Incognito Window
+ Name[en_US]=New Incognito Window
+ Name[en_US.UTF-8]=New Incognito Window

@@ -1,0 +1,304 @@
+#!/usr/bin/python3
+"""Speech Dispatcher output module for Kokoro TTS.
+
+Speaks the Speech Dispatcher module protocol on stdin/stdout and gets audio from
+the kokoro-tts user service (~/kokoro/server.py) over a Unix socket.
+
+Unlike sd_generic, pause and stop cut playback off immediately. Speech Dispatcher
+inserts <mark name="__spd_N"/> after each sentence; the module reports a mark once
+the sentence before it has finished playing, so after a pause the server resumes
+from the start of the interrupted sentence.
+"""
+import fcntl
+import html
+import json
+import os
+import queue
+import re
+import socket
+import subprocess
+import sys
+import threading
+
+SOCKET = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "kokoro-tts.sock")
+LOG = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "speech-dispatcher", "log", "sd_kokoro.log")
+SAMPLE_RATE = 24000
+F_SETPIPE_SZ = 1031
+
+# (name, language); Heart first, since clients such as Chrome pick the first matching voice
+VOICES = [
+    ("af_heart", "en-US"),
+    ("af_bella", "en-US"),
+    ("af_nicole", "en-US"),
+    ("bf_emma", "en-GB"),
+    ("bf_isabella", "en-GB"),
+]
+VOICE_NAMES = {name for name, _ in VOICES}
+
+MARK_RE = re.compile(r'<mark\s+name="([^"]*)"\s*/>')
+TAG_RE = re.compile(r"<[^>]+>")
+
+out_lock = threading.Lock()
+
+
+def log(msg):
+    try:
+        with open(LOG, "a") as f:
+            f.write(msg + "\n")
+    except OSError:
+        pass
+
+
+def send(*lines):
+    with out_lock:
+        sys.stdout.write("".join(line + "\n" for line in lines))
+        sys.stdout.flush()
+
+
+def read_line():
+    line = sys.stdin.readline()
+    if not line:
+        raise EOFError
+    return line
+
+
+def read_block():
+    """Read lines up to a lone '.', undoing the protocol's dot-stuffing."""
+    lines = []
+    while (line := read_line()) != ".\n":
+        lines.append(line[1:] if line.startswith(".") else line)
+    return "".join(lines).removesuffix("\n")
+
+
+def segments(ssml):
+    """Split marked-up text into [(text, mark_after_or_None), ...]."""
+    parts = MARK_RE.split(ssml)
+    result = []
+    for i in range(0, len(parts), 2):
+        text = html.unescape(TAG_RE.sub(" ", parts[i]))
+        text = " ".join(text.split())
+        mark = parts[i + 1] if i + 1 < len(parts) else None
+        result.append((text, mark))
+    return result
+
+
+class Speaker:
+    def __init__(self):
+        self.settings = {"rate": "0", "volume": "100", "language": "en-US",
+                         "synthesis_voice": "NULL", "voice": "female1"}
+        self.lock = threading.Lock()
+        self.job = None  # the Job currently speaking
+
+    def voice(self):
+        name = self.settings.get("synthesis_voice", "NULL")
+        if name in VOICE_NAMES:
+            return name
+        if self.settings.get("language", "").lower().startswith("en-gb"):
+            return "bf_emma"
+        return "af_heart"
+
+    def speed(self):
+        try:
+            rate = int(self.settings.get("rate", "0"))
+        except ValueError:
+            rate = 0
+        return 2 ** (max(-100, min(rate, 100)) / 100)
+
+    def volume(self):
+        try:
+            vol = int(self.settings.get("volume", "100"))
+        except ValueError:
+            vol = 100
+        return max(0.0, min((vol + 100) / 200, 1.0))
+
+    def speak(self, text, msgtype):
+        self.halt(report=None)
+        if msgtype == "KEY":
+            text = text.replace("_", " ")
+        segs = segments(text) if msgtype == "TEXT" else [(text, None)]
+        job = Job(segs, self.voice(), self.speed(), self.volume())
+        with self.lock:
+            self.job = job
+        send("200 OK SPEAKING")
+        job.start(on_done=self.finished)
+
+    def finished(self, job, event):
+        with self.lock:
+            if self.job is not job:
+                return
+            self.job = None
+        send(event)
+
+    def halt(self, report):
+        """Stop the current job; report '703 STOP' or '704 PAUSE' if one was running."""
+        with self.lock:
+            job, self.job = self.job, None
+        if job:
+            job.cancel()
+            if report:
+                send(report)
+
+
+class Job:
+    def __init__(self, segs, voice, speed, volume):
+        self.segs = segs
+        self.voice, self.speed, self.volume = voice, speed, volume
+        self.cancelled = threading.Event()
+        self.audio = queue.Queue(maxsize=64)
+        self.sock = None
+        self.player = None
+
+    def start(self, on_done):
+        self.on_done = on_done
+        threading.Thread(target=self.fetch, daemon=True).start()
+        threading.Thread(target=self.play, daemon=True).start()
+
+    def cancel(self):
+        self.cancelled.set()
+        for closer in (lambda: self.player and self.player.kill(),
+                       lambda: self.sock and self.sock.close()):
+            try:
+                closer()
+            except OSError:
+                pass
+
+    def put(self, item):
+        """Queue audio for playback, giving up once the job is cancelled."""
+        while not self.cancelled.is_set():
+            try:
+                self.audio.put(item, timeout=0.2)
+                return
+            except queue.Full:
+                pass
+
+    def get(self):
+        while not self.cancelled.is_set():
+            try:
+                return self.audio.get(timeout=0.2)
+            except queue.Empty:
+                pass
+        return ("cancelled", None)
+
+    def fetch(self):
+        """Synthesize each sentence ahead of playback."""
+        try:
+            for text, mark in self.segs:
+                if text:
+                    request = json.dumps({"text": text, "voice": self.voice, "speed": self.speed})
+                    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                        self.sock = sock
+                        sock.connect(SOCKET)
+                        sock.sendall(request.encode() + b"\n")
+                        leftover = b""
+                        while chunk := sock.recv(65536):
+                            if self.cancelled.is_set():
+                                return
+                            data = leftover + chunk
+                            cut = len(data) - len(data) % 4
+                            leftover = data[cut:]
+                            self.put(("pcm", data[:cut]))
+                if mark:
+                    self.put(("mark", mark))
+        except OSError as error:
+            if not self.cancelled.is_set():
+                log(f"fetch failed: {error}")
+        finally:
+            self.put(("end", None))
+
+    def play(self):
+        begun = False
+        try:
+            self.player = subprocess.Popen(
+                ["pw-play", "--raw", "--rate", str(SAMPLE_RATE), "--channels", "1",
+                 "--format", "f32", "--volume", f"{self.volume:.2f}", "-"],
+                stdin=subprocess.PIPE, stderr=subprocess.DEVNULL)
+            try:  # a small pipe keeps index marks close to what is actually audible
+                fcntl.fcntl(self.player.stdin.fileno(), F_SETPIPE_SZ, 4096)
+            except OSError:
+                pass
+            if self.cancelled.is_set():
+                return
+            send("701 BEGIN")
+            begun = True
+            while True:
+                kind, data = self.get()
+                if self.cancelled.is_set():
+                    return
+                if kind == "pcm":
+                    self.player.stdin.write(data)
+                elif kind == "mark":
+                    self.player.stdin.flush()
+                    send(f"700-{data}", "700 INDEX MARK")
+                else:
+                    break
+            self.player.stdin.close()
+            self.player.wait()
+        except (OSError, ValueError) as error:
+            if not self.cancelled.is_set():
+                log(f"playback failed: {error}")
+        if not self.cancelled.is_set():
+            if not begun:
+                send("701 BEGIN")
+            self.on_done(self, "702 END")
+
+
+def read_settings(ack, kind, done, store=None):
+    send(f"{ack} OK RECEIVING {kind}SETTINGS")
+    settings = dict(line.split("=", 1) for line in read_block().splitlines() if "=" in line)
+    # Decline server-side audio: this module plays audio itself, which is what lets
+    # the server turn our 704 PAUSE into a real pause (not an end) for the client
+    if settings.get("audio_output_method") == "server":
+        send("303 ERROR INVALID PARAMETER OR VALUE")
+        return
+    if store is not None:
+        store.update(settings)
+    send(done)
+
+
+def main():
+    speaker = Speaker()
+    if read_line() != "INIT\n":
+        sys.exit(3)
+    send("299-Kokoro module ready", "299 OK LOADED SUCCESSFULLY")
+    while True:
+        try:
+            cmd = read_line().rstrip("\n")
+        except EOFError:
+            speaker.halt(report=None)
+            return
+        if cmd in ("SPEAK", "CHAR", "KEY", "SOUND_ICON"):
+            send("202 OK RECEIVING MESSAGE")
+            text = read_block()
+            if cmd == "SOUND_ICON" or not text.strip():
+                if cmd == "SOUND_ICON" or text:
+                    send("200 OK SPEAKING", "701 BEGIN", "702 END")
+                else:
+                    send("301 ERROR CANT SPEAK")
+                continue
+            if cmd == "CHAR" and text == "space":
+                text = " "
+            speaker.speak(text, "TEXT" if cmd == "SPEAK" else cmd)
+        elif cmd == "STOP":
+            speaker.halt(report="703 STOP")
+        elif cmd == "PAUSE":
+            speaker.halt(report="704 PAUSE")
+        elif cmd == "SET":
+            read_settings(203, "", "203 OK SETTINGS RECEIVED", speaker.settings)
+        elif cmd == "AUDIO":
+            read_settings(207, "AUDIO ", "203 OK AUDIO INITIALIZED")
+        elif cmd == "LOGLEVEL":
+            read_settings(207, "LOGLEVEL ", "203 OK LOGLEVEL SET")
+        elif cmd.startswith("LIST VOICES"):
+            send(*[f"200-{name}\t{lang}\tnone" for name, lang in VOICES], "200 OK VOICE LIST SENT")
+        elif cmd.startswith("DEBUG"):
+            send(f"200 OK DEBUGGING {'ON' if ' ON' in cmd else 'OFF'}")
+        elif cmd == "QUIT":
+            speaker.halt(report=None)
+            send("210 OK QUIT")
+            return
+        else:
+            send("300 ERR UNKNOWN COMMAND")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,11 @@
+[Unit]
+Description=Kokoro TTS server (af_heart) for Speech Dispatcher
+After=pipewire.service
+
+[Service]
+ExecStart=/usr/bin/distrobox enter -T kokoro -- %h/kokoro/.venv/bin/python %h/kokoro/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
