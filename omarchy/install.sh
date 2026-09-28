@@ -202,7 +202,8 @@ reload_hyprland() {
   fi
 }
 
-# Keys already bound to something other than kokoro-speak
+# Keys already bound to something other than kokoro-speak. Omarchy's Lua binds show
+# up as "__lua N" in .arg, so our own keys are also recognised by their description.
 key_clashes() {
   have hyprctl && hyprctl version >/dev/null 2>&1 || return 0
   local check mod key
@@ -210,7 +211,7 @@ key_clashes() {
     read -r mod key <<<"$check"
     hyprctl binds -j | jq -r --argjson mod "$mod" --arg key "$key" '
       .[] | select(.modmask == $mod and (.key | ascii_upcase) == $key)
-          | select(.arg | contains("kokoro-speak") | not)
+          | select((.arg | contains("kokoro-speak")) or (.description | IN("Speak selection", "Speak clipboard")) | not)
           | "\(.description // "") (\(.dispatcher) \(.arg))"'
   done
 }
