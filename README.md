@@ -44,12 +44,12 @@ git clone https://github.com/girlpocalypse/sloptts && cd sloptts
 ./omarchy/install.sh --uninstall
 ```
 
-Then select some text and press **Super + Alt + S**. Press it again to stop.
-**Super + Alt + Shift + S** reads the clipboard.
+Then select some text and press **Super + Alt + R**. Press it again to stop.
+**Super + Alt + Shift + R** reads the clipboard.
 
 ### What the installer does
 
-1. **Checks the keys first.** If Super+Alt+S or Super+Alt+Shift+S is already bound
+1. **Checks the keys first.** If Super+Alt+R or Super+Alt+Shift+R is already bound
    (`hyprctl binds`), it stops and names the binding. Change `KEY_*` at the top of the
    script to pick others, or pass `--no-bindings`.
 2. **Downloads the model** (`kokoro-v1.0.onnx` and `voices-v1.0.bin`, 350 MB) to
