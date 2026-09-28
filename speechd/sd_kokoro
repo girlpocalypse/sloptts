@@ -20,7 +20,8 @@ import subprocess
 import sys
 import threading
 
-SOCKET = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "kokoro-tts.sock")
+SOCKET = os.environ.get("KOKORO_SOCKET") or os.path.join(
+    os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "kokoro-tts", "kokoro-tts.sock")
 LOG = os.path.join(os.environ.get("XDG_RUNTIME_DIR", "/tmp"), "speech-dispatcher", "log", "sd_kokoro.log")
 SAMPLE_RATE = 24000
 F_SETPIPE_SZ = 1031
