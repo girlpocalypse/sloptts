@@ -54,6 +54,19 @@ here (or the reverse) when asked.
     marks; measure first-audio latency per message before and after (log timestamps in
     `sd_kokoro` and `server.py`). The GPU (see README) would only shave synthesis time,
     not process start-up.
+- [ ] **Chunk long text so speech starts sooner.** `server.py` passes the whole request
+  to one kokoro-onnx `create_stream`, which synthesizes up to ~510 phonemes before
+  yielding anything, so nothing plays until that whole batch is done. Measured on the CPU
+  backend (2026-09-28): 18 chars took 0.64 s to first audio; 299 chars (17.9 s of speech)
+  took 4.9 s to first audio, all of it arriving at once. Synthesis runs 2–4x real time,
+  so it only needs a head start.
+  - Idea: in `handle()`, split the cleaned text at sentence ends (not inside "5.5",
+    "e.g." and the like; `normalize()` runs first) and synthesize one chunk at a time,
+    maybe a short first chunk and bigger ones after, writing each to the socket as it's
+    ready. The client keeps one `pw-play`, so no gaps as long as synthesis stays ahead.
+  - Check the stop behaviour still works: a client disconnect must abandon the
+    remaining chunks.
+  - Measure time to first audio before and after, on CPU and GPU.
 - [ ] **Fix punctuation pronunciation.** Partly done: `server.py`'s `normalize()` now
   spells out decimals, dotted numbers, `v1.2` versions, `name.ext`/domains, "e.g." and
   "i.e.". Tested with kokoro-onnx 0.6.1: `"Opus 5.5."` (decimal followed by more punctuation)
