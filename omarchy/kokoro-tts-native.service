@@ -1,0 +1,12 @@
+[Unit]
+Description=Kokoro TTS server (native, CPU)
+
+[Service]
+# Optionally KOKORO_LOG_TEXT=1
+EnvironmentFile=-%h/.config/kokoro-tts/env
+ExecStart=%h/.local/share/kokoro-tts/.venv/bin/python %h/.local/share/kokoro-tts/server.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,25 @@
+[Unit]
+Description=Kokoro TTS server (rootless Docker, GPU)
+After=docker.service
+Requires=docker.service
+
+[Service]
+# KOKORO_GPU_ARGS (written by install.sh) and optionally KOKORO_LOG_TEXT=1
+EnvironmentFile=%h/.config/kokoro-tts/env
+ExecStartPre=-/usr/bin/docker rm -f kokoro-tts
+ExecStartPre=/usr/bin/mkdir -p %t/kokoro-tts
+# The container runs as its own root, which rootless Docker maps to you, so the
+# socket it creates is yours. Only the socket directory is shared, not all of
+# $XDG_RUNTIME_DIR (that would expose the Wayland and PipeWire sockets).
+ExecStart=/usr/bin/docker run --rm --name kokoro-tts \
+    --network none --read-only --tmpfs /tmp \
+    $KOKORO_GPU_ARGS -e KOKORO_LOG_TEXT \
+    -v %h/.local/share/kokoro-tts:/models:ro \
+    -v %t/kokoro-tts:/run/kokoro-tts \
+    sloptts-kokoro
+ExecStop=/usr/bin/docker stop kokoro-tts
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
