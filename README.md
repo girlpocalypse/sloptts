@@ -17,7 +17,7 @@ now has an installer for [Omarchy](https://omarchy.org/) (Arch + Hyprland).
 
 | Path | What it is |
 |---|---|
-| `server/server.py` | The TTS server. Protocol: one JSON line `{"text","voice","speed"}` in, raw 24 kHz mono float32 PCM out until the server closes the connection. A client disconnecting stops synthesis. Normalizes dots that espeak-ng would read as sentence ends (`5.5.`, `1.2.3`, `example.com`, `e.g.`). |
+| `server/server.py` | The TTS server. Protocol: one JSON line `{"text","voice","speed"}` in, raw 24 kHz mono float32 PCM out until the server closes the connection. A client disconnecting stops synthesis. Normalizes dots that espeak-ng would read as sentence ends (`5.5.`, `1.2.3`, `example.com`, `e.g.`), and turns rendered math into words: math letters (`𝜋`, `𝑟`, `ℝ`), powers, fractions, derivatives, limits, integral and sum bounds, absolute values, factorials, primes, accents, and the symbols espeak-ng skips or misreads. |
 | `server/say.py` | Standalone script to compare voices (`say.py VOICE "text" [--speed] [--out f.wav] [--list]`). |
 | `bin/kokoro-speak` | Client for keys and scripts. Sends the whole text in one request into one `pw-play`, so there's no start-up gap between sentences. Only one instance speaks at a time. |
 | `speechd/sd_kokoro` | Speech Dispatcher output module (Python, standard library only). Pause, resume and stop cut off immediately, and index marks are reported as sentences finish. |
