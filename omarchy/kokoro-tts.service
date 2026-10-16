@@ -1,5 +1,5 @@
 [Unit]
-Description=Kokoro TTS server (native, CPU)
+Description=Kokoro TTS server
 
 [Service]
 # Optionally KOKORO_LOG_TEXT=1

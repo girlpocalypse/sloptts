@@ -1,11 +1,14 @@
 """Speak text with Kokoro: say.py VOICE "text" [--speed 1.0] [--out file.wav]"""
 import argparse
+import os
 import subprocess
 import tempfile
 from pathlib import Path
 
-import soundfile as sf
-from kokoro_onnx import Kokoro
+os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")  # see server.py; before onnxruntime loads
+
+import soundfile as sf  # noqa: E402
+from kokoro_onnx import Kokoro  # noqa: E402
 
 HERE = Path(__file__).parent
 

@@ -1,20 +1,18 @@
 #!/usr/bin/env bash
 # Install the Kokoro TTS setup on Omarchy: the server as a user service, the
 # kokoro-speak client, and Hyprland keys to speak the selection or clipboard.
-# Safe to re-run. Everything is per-user; only package installs need root.
+# The server runs from a uv venv, on an NVIDIA GPU with CUDA when there is one, otherwise
+# on the CPU. Safe to re-run. Everything is per-user; only package installs need root.
 #
-#   ./omarchy/install.sh                  install (backend picked automatically)
+#   ./omarchy/install.sh                  install
+#   ./omarchy/install.sh --cpu            use the CPU even if there's an NVIDIA GPU
 #   ./omarchy/install.sh --with-speechd   also: Speech Dispatcher module + Chrome flag
 #   ./omarchy/install.sh --no-bindings    skip the Hyprland keys
 #   ./omarchy/install.sh --uninstall      remove it again (keeps the model files)
-#
-# Backend: rootless Docker on the GPU when a container can use the GPU, otherwise
-# a native Python venv on the CPU. Force one with --backend docker|native.
 set -euo pipefail
 
 REPO=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 DATA=$HOME/.local/share/kokoro-tts
-ENV_DIR=$HOME/.config/kokoro-tts
 UNIT_DIR=$HOME/.config/systemd/user
 BIN=$HOME/.local/bin
 MODULE_DIR=$HOME/.local/libexec/speech-dispatcher-modules
@@ -22,9 +20,18 @@ SPEECHD_DIR=$HOME/.config/speech-dispatcher
 CHROME_FLAGS=$HOME/.config/chrome-flags.conf
 BINDINGS=$HOME/.config/hypr/bindings.lua
 
-IMAGE=sloptts-kokoro
-BASE_IMAGE=python:3.12-slim
-MODEL_URL=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.0
+# Python is capped by kokoro-onnx (<3.14). Changing a version here upgrades the venv
+# on re-run.
+PYTHON_VERSION=3.13
+KOKORO_ONNX_VERSION=0.6.1
+ONNXRUNTIME_VERSION=1.31.0
+# model-files-v1.1 re-exports kokoro-v1.0.onnx (same weights) with a duration output,
+# which kokoro-onnx 0.6 uses for timestamps. A file that doesn't match is replaced.
+MODEL_URL=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-files-v1.1
+declare -A MODEL_SHA256=(
+  [kokoro-v1.0.onnx]=beb0d1848dee9a49da392cc3df26958d46cfa35d321edf434f52949153f0df3a
+  [voices-v1.0.bin]=bca610b8308e8d99f32e6fe4197e7ec01679264efed0cac9140fe9c29f1fbf7d
+)
 MODEL_FILES=(kokoro-v1.0.onnx voices-v1.0.bin)
 
 # Hyprland keys: modmask is SUPER=64 + ALT=8 (+ SHIFT=1), used to look for clashes.
@@ -34,7 +41,7 @@ KEY_SELECTION="ALT + F9"
 KEY_CLIPBOARD="SUPER + ALT + F9"
 KEY_CHECKS=("8 F9" "72 F9")
 
-BACKEND=auto
+USE_GPU=1
 WITH_SPEECHD=0
 BINDINGS_WANTED=1
 ACTION=install
@@ -44,12 +51,11 @@ warn() { printf '\033[33mwarning:\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 have() { command -v "$1" >/dev/null 2>&1; }
 
-usage() { sed -n '2,12p' "$0" | sed 's/^# \{0,1\}//'; }
+usage() { awk 'NR > 1 && !/^#/ { exit } NR > 1 { sub(/^# ?/, ""); print }' "$0"; }
 
 while (($#)); do
   case $1 in
-    --backend) BACKEND=${2:?--backend needs docker, native or auto}; shift ;;
-    --backend=*) BACKEND=${1#*=} ;;
+    --cpu) USE_GPU=0 ;;
     --with-speechd) WITH_SPEECHD=1 ;;
     --no-bindings) BINDINGS_WANTED=0 ;;
     --uninstall) ACTION=uninstall ;;
@@ -58,7 +64,6 @@ while (($#)); do
   esac
   shift
 done
-[[ $BACKEND =~ ^(auto|docker|native)$ ]] || die "--backend must be auto, docker or native"
 
 # Install the packages that aren't there yet (pacman names)
 need_packages() {
@@ -74,107 +79,81 @@ need_packages() {
 
 backup() { [[ -f $1 ]] && cp -p "$1" "$1.bak.$(date +%s)"; return 0; }
 
-# --- backend ------------------------------------------------------------------
+# --- server -------------------------------------------------------------------
 
-docker_rootless() {
-  have docker && docker info --format '{{.SecurityOptions}}' 2>/dev/null | grep -q rootless
-}
-
-# Print the docker run arguments that give a container the GPU, or fail
-docker_gpu_args() {
-  local args
-  for args in "--device nvidia.com/gpu=all" "--gpus all"; do
-    # shellcheck disable=SC2086  # $args is meant to split
-    if docker run --rm $args "$BASE_IMAGE" nvidia-smi -L >/dev/null 2>&1; then
-      echo "$args"
-      return 0
-    fi
-  done
-  return 1
-}
-
-gpu_help() {
-  cat >&2 <<'EOF'
-  Rootless Docker can't use the GPU yet. NVIDIA's setup for rootless mode:
-    omarchy pkg add nvidia-container-toolkit
-    nvidia-ctk runtime configure --runtime=docker --config="$HOME/.config/docker/daemon.json"
-    sudo nvidia-ctk config --set nvidia-container-cli.no-cgroups --in-place
-    sudo nvidia-ctk cdi generate --output=/etc/cdi/nvidia.yaml
-    systemctl --user restart docker
-  Check with: docker run --rm --device nvidia.com/gpu=all python:3.12-slim nvidia-smi -L
-  Then re-run this installer.
-EOF
-}
-
-# Can the built image load the model on CUDA? (the real test, not just nvidia-smi)
-docker_cuda_works() {
-  # shellcheck disable=SC2086
-  docker run --rm $1 --network none -v "$DATA:/models:ro" "$IMAGE" python -c '
-import sys, onnxruntime as o
-o.preload_dlls()
-s = o.InferenceSession("/models/kokoro-v1.0.onnx", providers=["CUDAExecutionProvider"])
-sys.exit("CUDAExecutionProvider" not in s.get_providers())'
-}
+sha256_ok() { [[ -s $1 ]] && [[ $(sha256sum "$1" | cut -d' ' -f1) == "$2" ]]; }
 
 download_models() {
   mkdir -p "$DATA"
   local file
   for file in "${MODEL_FILES[@]}"; do
-    if [[ ! -s $DATA/$file ]]; then
-      say "Downloading $file"
-      curl -fL --progress-bar -o "$DATA/$file.part" "$MODEL_URL/$file"
-      mv "$DATA/$file.part" "$DATA/$file"
-    fi
+    sha256_ok "$DATA/$file" "${MODEL_SHA256[$file]}" && continue
+    if [[ -e $DATA/$file ]]; then say "Replacing $file with the current release"; else say "Downloading $file"; fi
+    curl -fL --progress-bar -o "$DATA/$file.part" "$MODEL_URL/$file"
+    sha256_ok "$DATA/$file.part" "${MODEL_SHA256[$file]}" || die "$file: checksum mismatch (left in $DATA/$file.part)"
+    mv "$DATA/$file.part" "$DATA/$file"
   done
 }
 
-setup_docker() {  # $1: GPU args
-  say "Building the $IMAGE image (onnxruntime-gpu with CUDA wheels, a few GB)"
-  docker build -t "$IMAGE" "$REPO/server"
-  say "Checking that the model loads on CUDA"
-  if ! docker_cuda_works "$1"; then
-    docker rmi "$IMAGE" >/dev/null 2>&1 || true
-    return 1
-  fi
-  mkdir -p "$ENV_DIR"
-  local log_text=""
-  [[ -f $ENV_DIR/env ]] && log_text=$(grep '^KOKORO_LOG_TEXT=' "$ENV_DIR/env" || true)
-  printf 'KOKORO_GPU_ARGS=%s\n%s\n' "$1" "$log_text" >"$ENV_DIR/env"
-  install -Dm644 "$REPO/omarchy/kokoro-tts-docker.service" "$UNIT_DIR/kokoro-tts.service"
+has_nvidia_gpu() { have nvidia-smi && nvidia-smi -L >/dev/null 2>&1; }
+
+# Python version and onnxruntime build in the venv, e.g. "3.13 gpu"
+venv_state() {
+  "$DATA/.venv/bin/python" -I -c '
+import sys, importlib.metadata as m
+try:
+    m.distribution("onnxruntime-gpu")
+    build = "gpu"
+except m.PackageNotFoundError:
+    build = "cpu"
+print("%d.%d" % sys.version_info[:2], build)' 2>/dev/null
 }
 
-setup_native() {
+# Does the model load on CUDA in the venv? (the real test, not just nvidia-smi)
+cuda_works() {
+  ORT_DISABLE_TELEMETRY=1 "$DATA/.venv/bin/python" -I -c '
+import sys, onnxruntime as o
+o.preload_dlls()
+s = o.InferenceSession(sys.argv[1], providers=["CUDAExecutionProvider"])
+sys.exit("CUDAExecutionProvider" not in s.get_providers())' "$DATA/kokoro-v1.0.onnx" >/dev/null 2>&1
+}
+
+setup_venv() {  # $1: cpu or gpu
   need_packages uv
-  say "Creating the Python 3.12 venv in $DATA/.venv"
-  [[ -x $DATA/.venv/bin/python ]] || uv venv --python 3.12 "$DATA/.venv"
-  uv pip install --python "$DATA/.venv/bin/python" kokoro-onnx
-  install -m644 "$REPO/server/server.py" "$DATA/server.py"
-  install -Dm644 "$REPO/omarchy/kokoro-tts-native.service" "$UNIT_DIR/kokoro-tts.service"
+  local py=$DATA/.venv/bin/python
+  # The CPU and GPU builds install the same "onnxruntime" module, so switching between
+  # them starts from a fresh venv rather than uninstalling one over the other
+  if [[ $(venv_state) != "$PYTHON_VERSION $1" ]]; then
+    say "Creating the Python $PYTHON_VERSION venv ($1) in $DATA/.venv"
+    uv venv --clear --python "$PYTHON_VERSION" "$DATA/.venv"
+  fi
+  # --upgrade also moves the unpinned dependencies (numpy, phonemizer) to current releases
+  if [[ $1 == gpu ]]; then
+    # kokoro-onnx depends on the CPU onnxruntime: leave it out. The [cuda,cudnn] extras
+    # bring the CUDA 13 runtime as pip wheels (about 2.5 GB; needs NVIDIA driver 580+).
+    uv pip install --upgrade --python "$py" --excludes <(echo onnxruntime) \
+      "kokoro-onnx==$KOKORO_ONNX_VERSION" "onnxruntime-gpu[cuda,cudnn]==$ONNXRUNTIME_VERSION"
+  else
+    uv pip install --upgrade --python "$py" \
+      "kokoro-onnx==$KOKORO_ONNX_VERSION" "onnxruntime==$ONNXRUNTIME_VERSION"
+  fi
 }
 
 install_server() {
   download_models
-  local gpu_args=""
-  if [[ $BACKEND != native ]]; then
-    if ! docker_rootless; then
-      [[ $BACKEND == docker ]] && die "no rootless Docker found (docker info doesn't list rootless)"
-      say "No rootless Docker: using the native CPU backend"
-    elif ! gpu_args=$(docker_gpu_args); then
-      gpu_help
-      [[ $BACKEND == docker ]] && die "the Docker backend is only used with the GPU"
-      say "Using the native CPU backend for now"
-    fi
-  fi
-  if [[ -n $gpu_args ]]; then
-    say "Rootless Docker can use the GPU ($gpu_args)"
-    if ! setup_docker "$gpu_args"; then
-      [[ $BACKEND == docker ]] && die "the model didn't load on CUDA in the container"
-      warn "the model didn't load on CUDA in the container; using the native CPU backend"
-      setup_native
+  if ((USE_GPU)) && has_nvidia_gpu; then
+    say "NVIDIA GPU found: installing onnxruntime-gpu with the CUDA libraries"
+    setup_venv gpu
+    say "Checking that the model loads on CUDA"
+    if ! cuda_works; then
+      warn "the model didn't load on CUDA (is the NVIDIA driver 580 or newer?); using the CPU"
+      setup_venv cpu
     fi
   else
-    setup_native
+    setup_venv cpu
   fi
+  install -m644 "$REPO/server/server.py" "$DATA/server.py"
+  install -Dm644 "$REPO/omarchy/kokoro-tts.service" "$UNIT_DIR/kokoro-tts.service"
   systemctl --user daemon-reload
   systemctl --user enable kokoro-tts.service
   systemctl --user restart kokoro-tts.service
@@ -278,9 +257,6 @@ uninstall() {
   systemctl --user disable --now kokoro-tts.service 2>/dev/null || true
   rm -f "$UNIT_DIR/kokoro-tts.service"
   systemctl --user daemon-reload
-  if have docker && docker image inspect "$IMAGE" >/dev/null 2>&1; then
-    docker rmi "$IMAGE" >/dev/null
-  fi
 
   rm -f "$BIN/kokoro-speak"
   if [[ -f $BINDINGS ]] && grep -q '^-- >>> sloptts' "$BINDINGS"; then
@@ -302,7 +278,7 @@ uninstall() {
       sed -i '/^--enable-speech-dispatcher$/d' "$CHROME_FLAGS"
     fi
   fi
-  say "Done. Model files and the venv are still in $DATA (about 350 MB); remove them by hand if you like."
+  say "Done. Model files and the venv are still in $DATA ($(du -sh "$DATA" 2>/dev/null | cut -f1)); remove them by hand if you like."
 }
 
 # --- main ---------------------------------------------------------------------

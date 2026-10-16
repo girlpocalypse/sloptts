@@ -8,6 +8,9 @@ Environment:
     KOKORO_SOCKET     socket path (default $XDG_RUNTIME_DIR/kokoro-tts/kokoro-tts.sock)
     KOKORO_MODEL_DIR  directory with kokoro-v1.0.onnx and voices-v1.0.bin (default: next to this file)
     KOKORO_LOG_TEXT   set to 1 to log the text of each request (off: the journal would keep everything spoken)
+    ONNX_PROVIDER     onnxruntime execution provider (default: CUDAExecutionProvider when
+                      onnxruntime-gpu can use it, otherwise the CPU)
+    ORT_DISABLE_TELEMETRY  set to 1 here; set it to 0 to let onnxruntime send usage data
 """
 import asyncio
 import json
@@ -16,7 +19,12 @@ import os
 import re
 from pathlib import Path
 
-import onnxruntime
+# onnxruntime's pip builds send usage telemetry to Microsoft (device ID, OS, CPU, RAM,
+# executable path, providers, run counts and timings, errors), queued in
+# ~/.cache/Microsoft/DeveloperTools/.onnxruntime/. This must be set before the import.
+os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+
+import onnxruntime  # noqa: E402
 
 RUNTIME_DIR = Path(os.environ.get("XDG_RUNTIME_DIR", "/tmp"))
 SOCKET = Path(os.environ.get("KOKORO_SOCKET") or RUNTIME_DIR / "kokoro-tts" / "kokoro-tts.sock")
@@ -27,18 +35,22 @@ DEFAULT_VOICE = "af_heart"
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 log = logging.getLogger("kokoro-server")
 
-# onnxruntime-gpu from pip finds the CUDA libraries of the nvidia-* wheels only
-# once they are preloaded; a no-op without them
+# onnxruntime-gpu from pip finds the CUDA libraries of the nvidia-* wheels only once
+# they are preloaded. Ask for CUDA explicitly: kokoro-onnx would otherwise try every
+# provider the build has, starting with TensorRT, which isn't installed.
 if "CUDAExecutionProvider" in onnxruntime.get_available_providers():
     try:
         onnxruntime.preload_dlls()
-    except Exception as error:  # an older onnxruntime, or no CUDA wheels
+        os.environ.setdefault("ONNX_PROVIDER", "CUDAExecutionProvider")
+    except Exception as error:  # no CUDA wheels: stay on the CPU
         log.warning("preload_dlls failed: %s", error)
 
 from kokoro_onnx import Kokoro  # noqa: E402  (after the CUDA preload)
 
 kokoro = Kokoro(str(MODEL_DIR / "kokoro-v1.0.onnx"), str(MODEL_DIR / "voices-v1.0.bin"))
 voices = set(kokoro.get_voices())
+# The first run on CUDA sets up kernels and memory (~0.6 s); pay that now, not on the first request
+kokoro.create("Ready.", voice=DEFAULT_VOICE)
 
 # espeak-ng (through phonemizer, which keeps punctuation) treats a "." inside a
 # token as a sentence end when more punctuation follows: "Opus 5.5." comes out

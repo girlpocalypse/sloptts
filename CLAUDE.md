@@ -9,10 +9,10 @@ The files here are **copies**. The live versions are at the paths listed in READ
 Don't change the running system unless asked; edit the live file and copy it back
 here (or the reverse) when asked.
 
-- **Omarchy:** `omarchy/install.sh` installs everything. The server runs in rootless
-  Docker only when a container can use the GPU (checked at install time); otherwise it
-  runs natively from a uv venv in `~/.local/share/kokoro-tts/.venv`. Keys go in a marked
-  block in `~/.config/hypr/bindings.lua`.
+- **Omarchy:** `omarchy/install.sh` installs everything. The server runs natively (no
+  Docker) from a uv venv in `~/.local/share/kokoro-tts/.venv`: onnxruntime-gpu with the
+  CUDA pip wheels when there's an NVIDIA GPU, else the CPU onnxruntime (`--cpu` forces
+  it). Keys go in a marked block in `~/.config/hypr/bindings.lua`.
 - **Fedora:** use `/usr/bin/python3` on the host, since `python3` on PATH is Homebrew's
   and lacks `gi` and `speechd`. The server runs in the `kokoro` distrobox (Python 3.12
   venv in `~/kokoro/.venv`).
@@ -52,12 +52,14 @@ here (or the reverse) when asked.
     instead of spawning one per job; keep the server connection warm; send a whole message
     in one request and have the server report sentence boundaries back for index
     marks; measure first-audio latency per message before and after (log timestamps in
-    `sd_kokoro` and `server.py`). The GPU (see README) would only shave synthesis time,
-    not process start-up.
+    `sd_kokoro` and `server.py`).
+  - kokoro-onnx 0.6's `create_timed()` returns per-phoneme timings, but only with the
+    `model-files-v1.1` export (it has a `duration` output; the installer now fetches it).
+    That could give the server the sentence boundaries to report back.
 - [ ] **Chunk long text so speech starts sooner.** `server.py` passes the whole request
   to one kokoro-onnx `create_stream`, which synthesizes up to ~510 phonemes before
   yielding anything, so nothing plays until that whole batch is done. Measured on the CPU
-  backend (2026-09-28): 18 chars took 0.64 s to first audio; 299 chars (17.9 s of speech)
+  (2026-09-28): 18 chars took 0.64 s to first audio; 299 chars (17.9 s of speech)
   took 4.9 s to first audio, all of it arriving at once. Synthesis runs 2–4x real time,
   so it only needs a head start.
   - Idea: in `handle()`, split the cleaned text at sentence ends (not inside "5.5",
@@ -66,7 +68,11 @@ here (or the reverse) when asked.
     ready. The client keeps one `pw-play`, so no gaps as long as synthesis stays ahead.
   - Check the stop behaviour still works: a client disconnect must abandon the
     remaining chunks.
-  - Measure time to first audio before and after, on CPU and GPU.
+  - Measure time to first audio before and after, on CPU and GPU. On the GPU (RTX 3060,
+    2026-10-15) 275 chars took 1.2 s, so this matters much less there.
+  - Still true with kokoro-onnx 0.6.1 + onnxruntime 1.31 (2026-10-15): 334 chars gave
+    4.9 s to first audio, all at once. 0.6 adds `create(continuous=True)` (sliding-window
+    synthesis, needs the v1.1 export) but it isn't streaming; chunking is still ours.
 - [ ] **Fix punctuation pronunciation.** Partly done: `server.py`'s `normalize()` now
   spells out decimals, dotted numbers, `v1.2` versions, `name.ext`/domains, "e.g." and
   "i.e.". Tested with kokoro-onnx 0.6.1: `"Opus 5.5."` (decimal followed by more punctuation)

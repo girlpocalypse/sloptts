@@ -18,12 +18,11 @@ now has an installer for [Omarchy](https://omarchy.org/) (Arch + Hyprland).
 | Path | What it is |
 |---|---|
 | `server/server.py` | The TTS server. Protocol: one JSON line `{"text","voice","speed"}` in, raw 24 kHz mono float32 PCM out until the server closes the connection. A client disconnecting stops synthesis. Normalizes dots that espeak-ng would read as sentence ends (`5.5.`, `1.2.3`, `example.com`, `e.g.`). |
-| `server/Dockerfile` | Image for the GPU backend: `python:3.12-slim`, kokoro-onnx, onnxruntime-gpu with the CUDA runtime as pip wheels. The model is mounted at run time, not baked in. |
 | `server/say.py` | Standalone script to compare voices (`say.py VOICE "text" [--speed] [--out f.wav] [--list]`). |
 | `bin/kokoro-speak` | Client for keys and scripts. Sends the whole text in one request into one `pw-play`, so there's no start-up gap between sentences. Only one instance speaks at a time. |
 | `speechd/sd_kokoro` | Speech Dispatcher output module (Python, standard library only). Pause, resume and stop cut off immediately, and index marks are reported as sentences finish. |
 | `omarchy/install.sh` | Omarchy installer (details below). |
-| `omarchy/kokoro-tts-docker.service`, `omarchy/kokoro-tts-native.service` | The two versions of the `kokoro-tts` user unit. The installer installs one. |
+| `omarchy/kokoro-tts.service` | The `kokoro-tts` user unit (runs `server.py` from the venv). |
 | `omarchy/bindings.lua` | Template for the Hyprland keys block. |
 | `fedora/` | The original Fedora Silverblue setup: distrobox unit, `speechd.conf`, `sd_generic` config, Chrome launcher, Orca settings, libspiel RPM spec, backups. |
 
@@ -52,23 +51,24 @@ Then select some text and press **Alt + F9**. Press it again to stop.
 1. **Checks the keys first.** If Alt+F9 or Super+Alt+F9 is already bound
    (`hyprctl binds`), it stops and names the binding. Change `KEY_*` at the top of the
    script to pick others, or pass `--no-bindings`.
-2. **Downloads the model** (`kokoro-v1.0.onnx` and `voices-v1.0.bin`, 350 MB) to
-   `~/.local/share/kokoro-tts/`, unless the files are already there.
-3. **Picks a backend.** Rootless Docker is used **only if a container can use the
-   GPU**. Otherwise the server runs natively on the CPU.
-   - **Docker (GPU):** needs rootless Docker (`docker info` lists `rootless`) and the
-     NVIDIA container toolkit. It tries `--device nvidia.com/gpu=all` (CDI), then
-     `--gpus all`, and builds the image (a few GB of CUDA wheels). Before using the image
-     it checks that the model actually loads on CUDA; if it doesn't, it removes the
-     image and falls back to native. The container runs with `--network none` and a
-     read-only root. Only `$XDG_RUNTIME_DIR/kokoro-tts/` is shared with it (not the
-     whole runtime directory, which holds the Wayland and PipeWire sockets). The
-     container's root is you under rootless Docker, so the 0600 socket belongs to you.
-   - **Native (CPU):** a Python 3.12 venv made by `uv` in
-     `~/.local/share/kokoro-tts/.venv`. On the i7-8700 this ran at a real-time factor of
-     about 0.27, which is fine for listening.
-   - If the GPU isn't reachable, the installer prints NVIDIA's rootless setup steps. Force
-     a backend with `--backend docker|native`.
+2. **Downloads the model** (`kokoro-v1.0.onnx` and `voices-v1.0.bin`, 350 MB) from
+   kokoro-onnx's `model-files-v1.1` release to `~/.local/share/kokoro-tts/`, checking
+   each file's SHA-256. A file that's already there with the right checksum is kept; one
+   that doesn't match, such as the older `model-files-v1.0` export of the same model, is
+   replaced.
+3. **Sets up the server** in a Python 3.13 venv made by `uv` in
+   `~/.local/share/kokoro-tts/.venv`, natively (no containers):
+   - **NVIDIA GPU** (`nvidia-smi -L` works): `onnxruntime-gpu[cuda,cudnn]`, which brings
+     the CUDA 13 runtime and cuDNN as pip wheels (about 2.5 GB; needs driver 580+). The
+     CPU `onnxruntime` that kokoro-onnx depends on is left out (`uv pip install
+     --excludes`), since both install the same module. The installer then checks that
+     the model actually loads on CUDA, and uses the CPU if it doesn't. On an RTX 3060
+     this runs at about 30x real time (24 s of speech in 1.2 s) and uses about 640 MiB
+     of VRAM.
+   - **CPU** (no NVIDIA GPU, or `--cpu`): plain `onnxruntime`. On the i7-8700 this runs
+     at a real-time factor of about 0.24, which is fine for listening.
+   - The venv is recreated when its Python version or onnxruntime build (CPU/GPU)
+     differs from what's wanted, instead of swapping one build over the other.
 4. **Installs** `kokoro-speak` to `~/.local/bin` and the `kokoro-tts` user service
    (enabled and started).
 5. **Adds the keys** as a marked block (`-- >>> sloptts` … `-- <<< sloptts`) at the end of
@@ -81,15 +81,19 @@ Then select some text and press **Alt + F9**. Press it again to stop.
    - Adds `--enable-speech-dispatcher` to `~/.config/chrome-flags.conf`, which the AUR
      `google-chrome` launcher reads. Quit Chrome fully (**⋮ → Exit**) afterwards.
 
-Packages come from `omarchy pkg add`: `jq`, `wl-clipboard`, `libnotify`, `uv` (native
-only) and `speech-dispatcher` (optional). The installer doesn't install Docker or the
-NVIDIA toolkit. Re-running it is safe; it replaces its own key block and unit.
+Packages come from `omarchy pkg add`: `jq`, `wl-clipboard`, `libnotify`, `uv` and
+`speech-dispatcher` (optional). Re-running the installer is safe; it replaces its own key
+block and unit.
+
+**Versions** (Python, kokoro-onnx, onnxruntime) are set at the top of `install.sh`.
+Re-running the installer after changing them upgrades the venv (and its unpinned
+dependencies).
 
 ### Checking it
 
 ```bash
 systemctl --user status kokoro-tts
-journalctl --user -u kokoro-tts -f   # "providers: CUDAExecutionProvider" on the GPU backend
+journalctl --user -u kokoro-tts -f   # "providers: CUDAExecutionProvider, ..." on the GPU
 kokoro-speak "Hello from Kokoro."
 kokoro-speak --voice bf_emma --speed 1.2 "Different voice"
 spd-say "hello"                      # with --with-speechd
@@ -104,7 +108,7 @@ isn't running).
 Hyprland key ─▶ kokoro-speak ───────────────────────┐
                                                     ├─ Unix socket ─▶ server.py
 Chrome / spd-say ─▶ speech-dispatcher ─▶ sd_kokoro ─┘
-                                                                      (Docker + CUDA, or native venv)
+                                                                      (uv venv, CUDA or CPU)
                                                                       │
       each client plays the PCM it gets back with pw-play ◀───────────┘
 ```
@@ -198,6 +202,19 @@ stdin.
   `.` inside it that kokoro-onnx pauses on. `server.py` spells these out before
   phonemizing. (kokoro-onnx 0.6.1; `"Opus 5.5"` with nothing after it was already
   fine there.)
+- **onnxruntime phones home.** Its pip builds (CPU and GPU, seen in 1.30 and 1.31) include
+  Microsoft's 1DS telemetry, which queues events in
+  `~/.cache/Microsoft/DeveloperTools/.onnxruntime/` and uploads them to
+  `mobile.events.data.microsoft.com` about 9 s after startup. The events hold a persistent
+  device ID, kernel version, CPU model, RAM, the Python executable path, which providers
+  ran, run counts and timings, and error messages (no text, voices or model names).
+  `ORT_DISABLE_TELEMETRY=1` stops both the queueing and the upload; `server.py`, `say.py`
+  and the installer's CUDA check set it before onnxruntime loads.
+- **onnxruntime-gpu needs two nudges.** The CUDA libraries from the `nvidia-*` wheels
+  are only found after `onnxruntime.preload_dlls()`, and kokoro-onnx, given
+  onnxruntime-gpu, tries every provider the build has, starting with TensorRT (not
+  installed, so it logs an error and falls back). `server.py` preloads and sets
+  `ONNX_PROVIDER=CUDAExecutionProvider` itself when CUDA is available.
 - **Spiel doesn't reach Chrome** (Fedora). Orca 50 supports Spiel (it needs libspiel's
   `Spiel-1.0.typelib`, which Fedora doesn't package, hence `fedora/spiel/`). Chrome and most
   apps use Speech Dispatcher instead. Piper through Spiel (`en_GB-cori-high`) was a step on
@@ -207,15 +224,9 @@ stdin.
   plus `synthesizer='espeak-ng'`) caused random voice switching.
 - **Host `python3` was Homebrew's** on the Fedora box. Use `/usr/bin/python3` there for
   GObject bindings (`gi`) and the `speechd` module.
-- **onnxruntime-gpu and onnxruntime can't both be installed.** They install the same
-  `onnxruntime` module, and kokoro-onnx depends on the CPU one, so the Dockerfile removes
-  it and reinstalls the GPU build over it. Without the CUDA libraries, the server logs
-  the failure and runs on the CPU rather than crashing.
 
 ## Not done / ideas
 
-- The Docker GPU path was tested only with stubs (no GPU or Docker daemon in the build
-  environment). The pip recipe and the CPU fallback were tested for real.
 - **Edge TTS** (cloud Microsoft neural voices through the unofficial `edge-tts`) was
   considered but not tried.
 - A Spiel provider for Kokoro could be written with libspeechprovider.
