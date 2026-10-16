@@ -28,10 +28,11 @@ MODEL_URL=https://github.com/thewh1teagle/kokoro-onnx/releases/download/model-fi
 MODEL_FILES=(kokoro-v1.0.onnx voices-v1.0.bin)
 
 # Hyprland keys: modmask is SUPER=64 + ALT=8 (+ SHIFT=1), used to look for clashes.
+# Alt+F9 and Super+Alt+F9 sit next to push-to-talk dictation on F9.
 # Not Super+Alt+S: stock Omarchy binds it to "Move window to scratchpad".
-KEY_SELECTION="SUPER + ALT + R"
-KEY_CLIPBOARD="SUPER + ALT + SHIFT + R"
-KEY_CHECKS=("72 R" "73 R")
+KEY_SELECTION="ALT + F9"
+KEY_CLIPBOARD="SUPER + ALT + F9"
+KEY_CHECKS=("8 F9" "72 F9")
 
 BACKEND=auto
 WITH_SPEECHD=0
